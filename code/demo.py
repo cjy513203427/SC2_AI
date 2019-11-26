@@ -320,6 +320,6 @@ class SentdeBot(sc2.BotAI):
 
 
 ## 启动游戏
-run_game(maps.get("AcidPlantLE"), [
+run_game(maps.get("AbyssalReefLE"), [
     Bot(Race.Protoss, SentdeBot()), Computer(Race.Terran, Difficulty.Medium)
 ], realtime=False)
