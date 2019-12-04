@@ -15,25 +15,41 @@ from sc2.constants import *
 import random
 import numpy as np
 import cv2
+import keras
 
-HEADLESS = True
+HEADLESS = False
 # os.environ["SC2PATH"] = 'F:\StarCraft II'
 
 class SentdeBot(sc2.BotAI):
-    def __init__(self):
+    def __init__(self,use_model = False):
         # 经过计算，每分钟大约165迭代次数
         self.ITERATIONS_PER_MINUTE = 165
         # 最大农民数量
         self.MAX_WORKERS = 50
         self.do_something_after = 0
         self.train_data = []
+        self.use_model = use_model
+        if self.use_model:
+            print("use model")
+            self.model = keras.models.load_model("BasicCNN-30-epochs-0.0001-LR-4.2")
+
+    # 存储.npy训练数据
+    # def on_end(self, game_result):
+    #     print('--- on_end called ---')
+    #     print(game_result)
+    #
+    #     if game_result == Result.Victory:
+    #         np.save("train_data/{}.npy".format(str(int(time.time()))), np.array(self.train_data))
 
     def on_end(self, game_result):
         print('--- on_end called ---')
-        print(game_result)
+        print(game_result, self.use_model)
 
-        if game_result == Result.Victory:
-            np.save("train_data/{}.npy".format(str(int(time.time()))), np.array(self.train_data))
+        with open("log.txt","a") as f:
+            if self.use_model:
+                f.write("Model {}\n".format(game_result))
+            else:
+                f.write("Random {}\n".format(game_result))
 
     async def on_step(self, iteration: int):
         self.iteration = iteration
@@ -151,12 +167,15 @@ class SentdeBot(sc2.BotAI):
 
         # flip horizontally to make our final fix in visual representation:
         self.flipped = cv2.flip(game_data, 0)
+        resized = cv2.resize(self.flipped, dsize=None, fx=2, fy=2)
 
-        if HEADLESS:
-            resized = cv2.resize(self.flipped, dsize=None, fx=2, fy=2)
-
-            cv2.imshow('Intel', resized)
-            cv2.waitKey(1)
+        if not HEADLESS:
+            if self.use_model:
+                cv2.imshow('Model Intel', resized)
+                cv2.waitKey(1)
+            else:
+                cv2.imshow('Random Intel', resized)
+                cv2.waitKey(1)
 
     def random_location_variance(self, enemy_start_location):
         x = enemy_start_location[0]
@@ -288,7 +307,19 @@ class SentdeBot(sc2.BotAI):
         #             for s in self.units(UNIT).idle:
         #                 await self.do(s.attack(random.choice(self.known_enemy_units)))
         if len(self.units(UnitTypeId.VOIDRAY).idle) > 0:
-            choice = random.randrange(0, 4)
+
+            if self.use_model:
+                prediction = self.model.predict([self.flipped.reshape(-1,176,200,3)])
+                choice = np.argmax(prediction[0])
+
+                choice_dict = {0: "No Attack!",
+                               1: "Attack close to our nexus!",
+                               2: "Attack Enemy Structure!",
+                               3: "Attack Enemy Start!"}
+                print("Choice #{}:{}".format(choice, choice_dict[choice]))
+            else:
+                choice = random.randrange(0, 4)
+
             target = False
             if self.iteration > self.do_something_after:
                 if choice == 0:
@@ -307,7 +338,7 @@ class SentdeBot(sc2.BotAI):
                         target = random.choice(self.known_enemy_structures)
 
                 elif choice == 3:
-                    # 攻击敌方出生位置
+                    # 攻击敌方出生位置（换家）
                     target = self.enemy_start_locations[0]
 
                 if target:
@@ -320,6 +351,8 @@ class SentdeBot(sc2.BotAI):
 
 
 ## 启动游戏
-run_game(maps.get("AbyssalReefLE"), [
-    Bot(Race.Protoss, SentdeBot()), Computer(Race.Terran, Difficulty.Medium)
-], realtime=False)
+for i in range(10):
+    run_game(maps.get("AbyssalReefLE"), [
+        Bot(Race.Protoss, SentdeBot(use_model=True)),
+        Computer(Race.Terran, Difficulty.Medium)
+    ], realtime=False)
