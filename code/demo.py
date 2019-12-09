@@ -5,6 +5,7 @@
 ------------      -------       -----------
 2019/11/3 12:32   Jonas           None
 '''
+import math
 import os
 import time
 
@@ -18,17 +19,21 @@ import cv2
 import keras
 
 HEADLESS = False
+
+
 # os.environ["SC2PATH"] = 'F:\StarCraft II'
 
 class SentdeBot(sc2.BotAI):
-    def __init__(self,use_model = False):
+    def __init__(self, use_model=False):
         # 经过计算，每分钟大约165迭代次数
-        self.ITERATIONS_PER_MINUTE = 165
+        # self.ITERATIONS_PER_MINUTE = 165
         # 最大农民数量
         self.MAX_WORKERS = 50
         self.do_something_after = 0
         self.train_data = []
         self.use_model = use_model
+        self.scouts_and_spots = {}
+
         if self.use_model:
             print("use model")
             self.model = keras.models.load_model("BasicCNN-30-epochs-0.0001-LR-4.2")
@@ -45,14 +50,18 @@ class SentdeBot(sc2.BotAI):
         print('--- on_end called ---')
         print(game_result, self.use_model)
 
-        with open("log.txt","a") as f:
+        with open("log.txt", "a") as f:
             if self.use_model:
                 f.write("Model {}\n".format(game_result))
             else:
                 f.write("Random {}\n".format(game_result))
 
-    async def on_step(self, iteration: int):
-        self.iteration = iteration
+    async def on_step(self, iteration):
+        # self.iteration = iteration
+        self.timeMinutes = ((self.state.game_loop / 22.4) / 60)
+
+        # print('Time:', self.timeMinutes)
+        await self.build_scout()
         await self.scout()
         await self.distribute_workers()
         await self.build_workers()
@@ -64,20 +73,75 @@ class SentdeBot(sc2.BotAI):
         await self.intel()
         await self.attack()
 
-    ## 侦察
-    async def scout(self):
-        if len(self.units(UnitTypeId.OBSERVER)) > 0:
-            scout = self.units(UnitTypeId.OBSERVER)[0]
-            if scout.is_idle:
-                enemy_location = self.enemy_start_locations[0]
-                move_to = self.random_location_variance(enemy_location)
-                print(move_to)
-                await self.do(scout.move(move_to))
-
-        else:
+    async def build_scout(self):
+        if len(self.units(UnitTypeId.OBSERVER)) < math.floor(self.timeMinutes / 3):
             for rf in self.units(UnitTypeId.ROBOTICSFACILITY).ready.noqueue:
+                print(len(self.units(UnitTypeId.OBSERVER)), self.timeMinutes / 3)
                 if self.can_afford(UnitTypeId.OBSERVER) and self.supply_left > 0:
                     await self.do(rf.train(UnitTypeId.OBSERVER))
+
+    ## 侦察
+    async def scout(self):
+        # {DISTANCE_TO_ENEMY_START:EXPANSIONLOC}
+        self.expand_dis_dir = {}
+        for el in self.expansion_locations:
+            distance_to_enemy_start = el.distance_to(self.enemy_start_locations[0])
+            #print(distance_to_enemy_start)
+            self.expand_dis_dir[distance_to_enemy_start] = el
+
+        self.ordered_exp_distances = sorted(k for k in self.expand_dis_dir)
+
+        existing_ids = [unit.tag for unit in self.units]
+        # removing of scouts that are actually dead now.
+        to_be_removed = []
+        for noted_scout in self.scouts_and_spots:
+            if noted_scout not in existing_ids:
+                to_be_removed.append(noted_scout)
+
+        for scout in to_be_removed:
+            del self.scouts_and_spots[scout]
+
+        if len(self.units(UnitTypeId.ROBOTICSFACILITY).ready) == 0:
+            unit_type = UnitTypeId.PROBE
+            unit_limit = 1
+        else:
+            unit_type = UnitTypeId.OBSERVER
+            unit_limit = 15
+
+        assign_scout = True
+
+        if unit_type == UnitTypeId.PROBE:
+            for unit in self.units(UnitTypeId.PROBE):
+                if unit.tag in self.scouts_and_spots:
+                    assign_scout = False
+
+        # 分配侦察任务
+        if assign_scout:
+            if len(self.units(unit_type).idle) > 0:
+                for obs in self.units(unit_type).idle[:unit_limit]:
+                    if obs.tag not in self.scouts_and_spots:
+                        for dist in self.ordered_exp_distances:
+                            try:
+                                location = next(value for key, value in self.expand_dis_dir.items() if key == dist)
+                                # DICT {UNIT_ID:LOCATION}
+                                active_locations = [self.scouts_and_spots[k] for k in self.scouts_and_spots]
+
+                                if location not in active_locations:
+                                    if unit_type == UnitTypeId.PROBE:
+                                        for unit in self.units(UnitTypeId.PROBE):
+                                            if unit.tag in self.scouts_and_spots:
+                                                continue
+                                    await self.do(obs.move(location))
+                                    self.scouts_and_spots[obs.tag] = location
+                                    break
+                            except Exception as e:
+                                pass
+
+        # 防止去侦察的农民采矿
+        for obs in self.units(unit_type):
+            if obs.tag in self.scouts_and_spots:
+                if obs in [probe for probe in self.units(UnitTypeId.PROBE)]:
+                    await self.do(obs.move(self.random_location_variance(self.scouts_and_spots[obs.tag])))
 
     async def intel(self):
         game_data = np.zeros((self.game_info.map_size[1], self.game_info.map_size[0], 3), np.uint8)
@@ -103,7 +167,7 @@ class SentdeBot(sc2.BotAI):
                 cv2.circle(game_data, (int(pos[0]), int(pos[1])), draw_dict[unit_type][0], draw_dict[unit_type][1], -1)
 
         # 主基地名称
-        main_base_names = ["nexus", "supplydepot", "hatchery"]
+        main_base_names = ['nexus', 'commandcenter', 'orbitalcommand', 'planetaryfortress', 'hatchery']
         # 记录敌方基地位置
         for enemy_building in self.known_enemy_structures:
             pos = enemy_building.position
@@ -129,7 +193,6 @@ class SentdeBot(sc2.BotAI):
         for obs in self.units(UnitTypeId.OBSERVER).ready:
             pos = obs.position
             cv2.circle(game_data, (int(pos[0]), int(pos[1])), 1, (255, 255, 255), -1)
-
 
         # 追踪资源、人口和军队人口比
         line_max = 50
@@ -162,9 +225,6 @@ class SentdeBot(sc2.BotAI):
         # 晶体矿/1500  minerals minerals/1500
         cv2.line(game_data, (0, 3), (int(line_max * mineral_ratio), 3), (0, 255, 25), 3)
 
-
-
-
         # flip horizontally to make our final fix in visual representation:
         self.flipped = cv2.flip(game_data, 0)
         resized = cv2.resize(self.flipped, dsize=None, fx=2, fy=2)
@@ -181,8 +241,8 @@ class SentdeBot(sc2.BotAI):
         x = enemy_start_location[0]
         y = enemy_start_location[1]
 
-        x += ((random.randrange(-20, 20)) / 100) * enemy_start_location[0]
-        y += ((random.randrange(-20, 20)) / 100) * enemy_start_location[1]
+        x += random.randrange(-5, 5)
+        y += random.randrange(-5, 5)
 
         if x < 0:
             x = 0
@@ -233,7 +293,7 @@ class SentdeBot(sc2.BotAI):
     ## 开矿
     async def expand(self):
         # (self.iteration / self.ITERATIONS_PER_MINUTE)是一个缓慢递增的值,动态开矿
-        if self.units(UnitTypeId.NEXUS).amount < self.iteration / self.ITERATIONS_PER_MINUTE and self.can_afford(
+        if self.units(UnitTypeId.NEXUS).amount < self.timeMinutes / 2 and self.can_afford(
                 UnitTypeId.NEXUS):
             await self.expand_now()
 
@@ -261,7 +321,7 @@ class SentdeBot(sc2.BotAI):
 
             # 控制核心存在的情况下建造星门
             if self.units(UnitTypeId.CYBERNETICSCORE).ready.exists:
-                if len(self.units(UnitTypeId.STARGATE)) < ((self.iteration / self.ITERATIONS_PER_MINUTE) / 2):
+                if len(self.units(UnitTypeId.STARGATE)) < self.timeMinutes:
                     if self.can_afford(UnitTypeId.STARGATE) and not self.already_pending(UnitTypeId.STARGATE):
                         await self.build(UnitTypeId.STARGATE, near=pylon)
 
@@ -309,7 +369,7 @@ class SentdeBot(sc2.BotAI):
         if len(self.units(UnitTypeId.VOIDRAY).idle) > 0:
 
             if self.use_model:
-                prediction = self.model.predict([self.flipped.reshape(-1,176,200,3)])
+                prediction = self.model.predict([self.flipped.reshape(-1, 176, 200, 3)])
                 choice = np.argmax(prediction[0])
 
                 choice_dict = {0: "No Attack!",
@@ -321,11 +381,11 @@ class SentdeBot(sc2.BotAI):
                 choice = random.randrange(0, 4)
 
             target = False
-            if self.iteration > self.do_something_after:
+            if self.timeMinutes > self.do_something_after:
                 if choice == 0:
                     # 什么都不做
-                    wait = random.randrange(20, 165)
-                    self.do_something_after = self.iteration + wait
+                    wait = random.randrange(7, 100) / 100
+                    self.do_something_after = self.timeMinutes + wait
 
                 elif choice == 1:
                     # 攻击离星灵枢纽最近的单位
@@ -351,8 +411,8 @@ class SentdeBot(sc2.BotAI):
 
 
 ## 启动游戏
-for i in range(10):
-    run_game(maps.get("AbyssalReefLE"), [
-        Bot(Race.Protoss, SentdeBot(use_model=True)),
-        Computer(Race.Terran, Difficulty.Medium)
-    ], realtime=False)
+# for i in range(50):
+run_game(maps.get("AbyssalReefLE"), [
+    Bot(Race.Protoss, SentdeBot(use_model=True)),
+    Computer(Race.Terran, Difficulty.Medium)
+], realtime=False)
